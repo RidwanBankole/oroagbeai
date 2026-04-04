@@ -1,0 +1,29 @@
+# Secrets — never commit these
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.venv/
+
+# Generated audio files — too large for git
+static/audio/*.wav
+static/audio/*.mp3
+
+# Testing
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+reserved/

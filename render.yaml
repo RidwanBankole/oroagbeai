@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: oro-agbe
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn "app:create_app()" --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    envVars:
+      - key: DEBUG
+        value: false
+      - key: BASE_URL
+        sync: false        # You will fill this in on Render dashboard after first deploy
+      - key: HF_API_TOKEN
+        sync: false        # Secret — fill in on Render dashboard
+      - key: AT_USERNAME
+        sync: false
+      - key: AT_API_KEY
+        sync: false
+      - key: AT_VOICE_NUMBER
+        sync: false
+      - key: AT_USSD_CODE
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: TRANSLATION_MODE
+        value: api
+      - key: TTS_MODE
+        value: api
