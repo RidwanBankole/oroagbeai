@@ -65,7 +65,7 @@ def create_app():
     app.config.from_object(Config)
 
     # Register blueprints
-    app.register_blueprint(ivr_bp)
+    # app.register_blueprint(ivr_bp)
     app.register_blueprint(ussd_bp)
 
     @app.route("/health")
@@ -84,7 +84,8 @@ def create_app():
 
 # Expose app at module level so gunicorn can find it on Render.
 # Render runs: gunicorn "app:create_app()" --bind 0.0.0.0:$PORT
-app = create_app()
+
 
 if __name__ == "__main__":
+    app = create_app()
     app.run(debug=True, port=5000)
