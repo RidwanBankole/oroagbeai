@@ -10,6 +10,7 @@ __pycache__/
 venv/
 env/
 .venv/
+myenv/
 
 # Generated audio files — too large for git
 static/audio/*.wav
