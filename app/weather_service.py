@@ -2,41 +2,24 @@
 Oro Agbe — Weather Service
 Fetches current weather + 24-hour forecast from Open-Meteo (free, no API key).
 Returns structured English text ready for translation.
+
+Timeout strategy:
+  Africa's Talking kills USSD sessions after ~5 s, so we must respond fast.
+  - connect_timeout = 3 s  (fail fast if the host is unreachable)
+  - read_timeout    = 5 s  (fail fast if the host stalls)
+  No retries on this layer — the USSD handler's background warm-up loop
+  handles retries safely outside the 5-second AT window.
 """
 import logging
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Retry-aware HTTP session
-# ---------------------------------------------------------------------------
-
-def _make_session() -> requests.Session:
-    """
-    Build a requests.Session that automatically retries on 429 / 5xx errors
-    with exponential backoff.  The Retry class honours the Retry-After header
-    that Open-Meteo sends on 429 responses, so we wait exactly as long as the
-    API asks rather than hammering it.
-    """
-    session = requests.Session()
-    retry = Retry(
-        total=4,                        # up to 4 attempts total
-        backoff_factor=2,               # waits: 2 s, 4 s, 8 s between retries
-        status_forcelist=[429, 500, 502, 503, 504],
-        respect_retry_after_header=True,
-        raise_on_status=False,          # we call raise_for_status() ourselves
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
+# Hard timeouts: (connect, read) — must keep total well under AT's 5 s limit
+_TIMEOUT = (3, 5)
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +97,7 @@ WIND_DIRECTIONS = [
 
 
 # ---------------------------------------------------------------------------
-# Small helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _wind_direction(degrees: float) -> str:
@@ -134,11 +117,7 @@ def _pick_hour_value(
     current_time: str,
     default: float = 0.0,
 ) -> float:
-    """
-    Match the hourly value to the current timestamp from Open-Meteo current.time.
-    Falls back to the first item only if matching fails.
-    """
-    times = hourly.get("time", [])
+    times  = hourly.get("time", [])
     values = hourly.get(field, [])
     if not values:
         return default
@@ -149,21 +128,12 @@ def _pick_hour_value(
         return values[0] if values else default
 
 
-# ---------------------------------------------------------------------------
-# Summary builders
-# ---------------------------------------------------------------------------
-
 def _build_now_summary(
-    condition: str,
-    temp: float,
-    feels_like: float,
-    humidity: int,
-    wind_speed: float,
-    is_day: bool,
+    condition: str, temp: float, feels_like: float,
+    humidity: int, wind_speed: float, is_day: bool,
 ) -> str:
     parts = []
-    day_phrase = "daytime" if is_day else "night-time"
-    parts.append(f"{condition} during the {day_phrase}")
+    parts.append(f"{condition} during the {'daytime' if is_day else 'night-time'}")
     if feels_like >= temp + 2:
         parts.append(f"feels warmer than the measured {temp:.0f}°C")
     elif feels_like <= temp - 2:
@@ -182,12 +152,8 @@ def _build_now_summary(
 
 
 def _build_today_summary(
-    today_condition: str,
-    high: float,
-    low: float,
-    precip_mm: float,
-    precip_hours: float,
-    wind_max: float,
+    today_condition: str, high: float, low: float,
+    precip_mm: float, precip_hours: float, wind_max: float,
 ) -> str:
     parts = [
         f"Today will be {today_condition.lower()}",
@@ -211,60 +177,37 @@ def _build_today_summary(
 
 
 def _farming_advisory(
-    weather_code: int,
-    temperature: float,
-    feels_like: float,
-    humidity: int,
-    current_precipitation: float,
-    daily_precipitation: float,
-    daily_precipitation_hours: float,
-    wind_speed: float,
-    uv_index: float,
+    weather_code: int, temperature: float, feels_like: float,
+    humidity: int, current_precipitation: float,
+    daily_precipitation: float, daily_precipitation_hours: float,
+    wind_speed: float, uv_index: float,
 ) -> str:
-    advice = []
-    thunder = weather_code in {95, 96, 99}
-    rainy = weather_code in {51, 53, 55, 61, 63, 65, 80, 81, 82}
+    advice     = []
+    thunder    = weather_code in {95, 96, 99}
+    rainy      = weather_code in {51, 53, 55, 61, 63, 65, 80, 81, 82}
     heavy_rain = daily_precipitation >= 20 or daily_precipitation_hours >= 8
-    hot = temperature >= 35 or feels_like >= 38
-    windy = wind_speed >= 35
-    strong_uv = uv_index >= 8
+    hot        = temperature >= 35 or feels_like >= 38
+    windy      = wind_speed >= 35
+    strong_uv  = uv_index >= 8
 
     if thunder:
-        advice.append(
-            "Thunderstorm risk is high. Avoid field work and move indoors when clouds begin to build."
-        )
+        advice.append("Thunderstorm risk is high. Avoid field work and move indoors when clouds begin to build.")
     elif heavy_rain:
-        advice.append(
-            "Heavy rain may disrupt field work. Protect low-lying plots and improve drainage where possible."
-        )
+        advice.append("Heavy rain may disrupt field work. Protect low-lying plots and improve drainage where possible.")
     elif rainy:
-        advice.append(
-            "Rain is likely. Delay pesticide or fertiliser application to reduce wash-off."
-        )
+        advice.append("Rain is likely. Delay pesticide or fertiliser application to reduce wash-off.")
     elif daily_precipitation < 1:
-        advice.append(
-            "Conditions look mostly dry. Irrigation may be needed for moisture-sensitive crops."
-        )
+        advice.append("Conditions look mostly dry. Irrigation may be needed for moisture-sensitive crops.")
     if hot:
-        advice.append(
-            "Heat stress is possible. Water crops early and reduce strenuous afternoon work."
-        )
+        advice.append("Heat stress is possible. Water crops early and reduce strenuous afternoon work.")
     if windy:
-        advice.append(
-            "Strong winds may damage light covers or young plants. Secure protective materials."
-        )
+        advice.append("Strong winds may damage light covers or young plants. Secure protective materials.")
     if humidity >= 90 and temperature >= 28:
-        advice.append(
-            "Warm and humid conditions may favour fungal growth. Monitor crops closely."
-        )
+        advice.append("Warm and humid conditions may favour fungal growth. Monitor crops closely.")
     if strong_uv and daily_precipitation < 1:
-        advice.append(
-            "Sun intensity will be high. Newly transplanted crops may need extra moisture attention."
-        )
+        advice.append("Sun intensity will be high. Newly transplanted crops may need extra moisture attention.")
     if current_precipitation > 0:
-        advice.append(
-            "Rain is already falling now, so postpone any spraying or harvesting that requires dry conditions."
-        )
+        advice.append("Rain is already falling now, so postpone any spraying or harvesting that requires dry conditions.")
     if not advice:
         return "Conditions are generally favourable for routine farm activities today."
     return " ".join(advice)
@@ -276,15 +219,13 @@ def _farming_advisory(
 
 def get_weather(lat: float, lon: float, location_name: str) -> Optional[WeatherData]:
     """
-    Fetch and interpret weather from Open-Meteo.
-
-    Uses a retry-aware session so transient 429 / 5xx errors are handled
-    automatically with exponential backoff before giving up.
+    Fetch weather from Open-Meteo with a hard fast timeout.
+    Returns None immediately on any error — no retries.
     """
     params = {
-        "latitude": lat,
-        "longitude": lon,
-        "timezone": "Africa/Lagos",
+        "latitude":      lat,
+        "longitude":     lon,
+        "timezone":      "Africa/Lagos",
         "forecast_days": 2,
         "current": (
             "temperature_2m,relative_humidity_2m,apparent_temperature,"
@@ -299,64 +240,30 @@ def get_weather(lat: float, lon: float, location_name: str) -> Optional[WeatherD
     }
     try:
         logger.info("Fetching weather for %s (%s, %s)", location_name, lat, lon)
-        session = _make_session()
-        response = session.get(
+        response = requests.get(
             "https://api.open-meteo.com/v1/forecast",
             params=params,
-            timeout=15,          # slightly longer to allow for retry waits
+            timeout=_TIMEOUT,
         )
         response.raise_for_status()
         data = response.json()
 
-        current = data["current"]
-        daily = data["daily"]
-        hourly = data.get("hourly", {})
-
-        today = {k: v[0] for k, v in daily.items()}
+        current  = data["current"]
+        daily    = data["daily"]
+        hourly   = data.get("hourly", {})
+        today    = {k: v[0] for k, v in daily.items()}
         tomorrow = (
             {k: v[1] for k, v in daily.items()}
-            if len(daily["weather_code"]) > 1
-            else today
+            if len(daily["weather_code"]) > 1 else today
         )
 
-        current_time = current["time"]
-        weather_code_now = current["weather_code"]
-        weather_condition_now = WMO_CODES.get(weather_code_now, "Variable conditions")
-        weather_condition_tomorrow = WMO_CODES.get(
-            tomorrow["weather_code"], "Variable conditions"
-        )
-
-        uv_index = _pick_hour_value(hourly, "uv_index", current_time, default=0.0)
-        sunrise = _safe_time_only(today["sunrise"])
-        sunset = _safe_time_only(today["sunset"])
-
-        summary_now = _build_now_summary(
-            condition=weather_condition_now,
-            temp=current["temperature_2m"],
-            feels_like=current["apparent_temperature"],
-            humidity=current["relative_humidity_2m"],
-            wind_speed=current["wind_speed_10m"],
-            is_day=bool(current["is_day"]),
-        )
-        summary_today = _build_today_summary(
-            today_condition=weather_condition_now,
-            high=today["temperature_2m_max"],
-            low=today["temperature_2m_min"],
-            precip_mm=today["precipitation_sum"],
-            precip_hours=today["precipitation_hours"],
-            wind_max=today["wind_speed_10m_max"],
-        )
-        advisory = _farming_advisory(
-            weather_code=weather_code_now,
-            temperature=current["temperature_2m"],
-            feels_like=current["apparent_temperature"],
-            humidity=current["relative_humidity_2m"],
-            current_precipitation=current["precipitation"],
-            daily_precipitation=today["precipitation_sum"],
-            daily_precipitation_hours=today["precipitation_hours"],
-            wind_speed=current["wind_speed_10m"],
-            uv_index=uv_index,
-        )
+        current_time           = current["time"]
+        weather_code_now       = current["weather_code"]
+        weather_condition_now  = WMO_CODES.get(weather_code_now, "Variable conditions")
+        weather_condition_tmrw = WMO_CODES.get(tomorrow["weather_code"], "Variable conditions")
+        uv_index               = _pick_hour_value(hourly, "uv_index", current_time)
+        sunrise                = _safe_time_only(today["sunrise"])
+        sunset                 = _safe_time_only(today["sunset"])
 
         return WeatherData(
             location=location_name,
@@ -377,13 +284,37 @@ def get_weather(lat: float, lon: float, location_name: str) -> Optional[WeatherD
             today_wind_max=today["wind_speed_10m_max"],
             sunrise=sunrise,
             sunset=sunset,
-            tomorrow_condition=weather_condition_tomorrow,
+            tomorrow_condition=weather_condition_tmrw,
             tomorrow_high=tomorrow["temperature_2m_max"],
             tomorrow_low=tomorrow["temperature_2m_min"],
             tomorrow_precipitation_mm=tomorrow["precipitation_sum"],
-            summary_now=summary_now,
-            summary_today=summary_today,
-            advisory=advisory,
+            summary_now=_build_now_summary(
+                condition=weather_condition_now,
+                temp=current["temperature_2m"],
+                feels_like=current["apparent_temperature"],
+                humidity=current["relative_humidity_2m"],
+                wind_speed=current["wind_speed_10m"],
+                is_day=bool(current["is_day"]),
+            ),
+            summary_today=_build_today_summary(
+                today_condition=weather_condition_now,
+                high=today["temperature_2m_max"],
+                low=today["temperature_2m_min"],
+                precip_mm=today["precipitation_sum"],
+                precip_hours=today["precipitation_hours"],
+                wind_max=today["wind_speed_10m_max"],
+            ),
+            advisory=_farming_advisory(
+                weather_code=weather_code_now,
+                temperature=current["temperature_2m"],
+                feels_like=current["apparent_temperature"],
+                humidity=current["relative_humidity_2m"],
+                current_precipitation=current["precipitation"],
+                daily_precipitation=today["precipitation_sum"],
+                daily_precipitation_hours=today["precipitation_hours"],
+                wind_speed=current["wind_speed_10m"],
+                uv_index=uv_index,
+            ),
         )
 
     except requests.RequestException as exc:
@@ -395,7 +326,6 @@ def get_weather(lat: float, lon: float, location_name: str) -> Optional[WeatherD
 
 
 def weather_to_english_text(w: WeatherData) -> str:
-    """Render the weather in a clean, useful style."""
     return (
         f"Weather report for {w.location}. "
         f"Right now, it is {w.weather_condition.lower()} with a temperature of {w.temperature:.0f}°C, "
@@ -413,7 +343,6 @@ def weather_to_english_text(w: WeatherData) -> str:
 
 
 def weather_to_structured_text(w: WeatherData) -> str:
-    """Optional alternative renderer for apps, WhatsApp bots, or TTS systems."""
     return (
         f"Location: {w.location}\n"
         f"Now: {w.weather_condition}, {w.temperature:.0f}°C, feels like {w.feels_like:.0f}°C.\n"
