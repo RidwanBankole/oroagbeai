@@ -325,7 +325,7 @@ def _weather_response(city: str, phone: str, next_presses: list[str]) -> str:
     """
     if next_presses:
         if next_presses[-1] == "0":
-            return END + "E dupe. O daro!"
+            return END + "A dupe. O dabo!"
         if next_presses[-1] == "00":
             return _main_menu()
 
@@ -368,7 +368,7 @@ def _weather_response(city: str, phone: str, next_presses: list[str]) -> str:
         + f"Oju ojo: {label}\n"
         + "-----------------\n"
         + f"{page_text}\n\n"
-        + "E dupe, agbẹ wa. O daro!"
+        + "A dupe, Agbe a gbe wa ooo!"
     )
 
 
