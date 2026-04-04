@@ -20,6 +20,7 @@ Africa's Talking USSD responses use plain text:
 """
 
 import logging
+import time
 from flask import Blueprint, request, current_app
 from app.location_service import geocode_city
 from app.weather_service import get_weather, weather_to_english_text
@@ -39,6 +40,36 @@ PRESET_CITIES = {
     "4": "Iragbiji",
 }
 
+# Cache final Yoruba weather text so pagination does not refetch weather
+_USSD_WEATHER_CACHE = {}
+_USSD_CACHE_TTL = 900  # 15 minutes
+
+
+def _cache_key(city: str) -> str:
+    return city.strip().lower()
+
+
+def _get_cached_weather_text(city: str) -> str | None:
+    key = _cache_key(city)
+    item = _USSD_WEATHER_CACHE.get(key)
+
+    if not item:
+        return None
+
+    if time.time() - item["ts"] > _USSD_CACHE_TTL:
+        _USSD_WEATHER_CACHE.pop(key, None)
+        return None
+
+    return item["text"]
+
+
+def _set_cached_weather_text(city: str, text: str) -> None:
+    key = _cache_key(city)
+    _USSD_WEATHER_CACHE[key] = {
+        "text": text,
+        "ts": time.time(),
+    }
+
 
 def _get_yoruba_weather(phone: str = "", city: str = "") -> str:
     """
@@ -47,17 +78,22 @@ def _get_yoruba_weather(phone: str = "", city: str = "") -> str:
     but it is no longer used for location logic.
     """
     try:
-        hf_token = current_app.config.get("HF_API_TOKEN", "")
-
         if not city:
             return "A ko ri ilu naa. Jowo yan ilu tabi tẹ orúkọ ilu."
+
+        cached = _get_cached_weather_text(city)
+        if cached:
+            logger.info("Using cached Yoruba weather for %s", city)
+            return cached
+
+        hf_token = current_app.config.get("HF_API_TOKEN", "")
 
         geocoded = geocode_city(city_name=city)
         if not geocoded:
             return f"A ko ri '{city}' ninu ètò wa. Jowo gbiyanju ilu miran."
 
         lat, lon, location_name = geocoded
-        logger.info(f"USSD weather for {location_name} ({lat}, {lon})")
+        logger.info("USSD weather for %s (%s, %s)", location_name, lat, lon)
 
         weather = get_weather(lat, lon, location_name)
         if not weather:
@@ -69,6 +105,7 @@ def _get_yoruba_weather(phone: str = "", city: str = "") -> str:
         if not yoruba_text:
             return "A ko le tumọ iroyin ojo lọwọlọwọ. Jowo gbiyanju lẹẹkansi."
 
+        _set_cached_weather_text(city, yoruba_text)
         return yoruba_text
 
     except Exception:
@@ -116,13 +153,17 @@ def ussd_session():
         text = request.form.get("text", "").strip()
 
         logger.info(
-            f"USSD session={session_id}, phone={phone}, serviceCode={service_code}, text='{text}'"
+            "USSD session=%s, phone=%s, serviceCode=%s, text='%s'",
+            session_id,
+            phone,
+            service_code,
+            text,
         )
 
         inputs = [t.strip() for t in text.split("*")] if text else []
 
         response = _route_ussd(phone, inputs)
-        logger.info(f"USSD response: {response[:120]}...")
+        logger.info("USSD response: %s...", response[:120])
         return response, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
     except Exception:
@@ -151,7 +192,6 @@ def _route_ussd(phone: str, inputs: list[str]) -> str:
     """
     Route the USSD session based on the input history.
     """
-
     if not inputs or inputs == [""]:
         return _main_menu()
 
@@ -162,10 +202,8 @@ def _route_ussd(phone: str, inputs: list[str]) -> str:
 
     if first in PRESET_CITIES:
         return _handle_own_location(phone, inputs)
-
     elif first == "5":
         return _handle_city_choice(phone, inputs)
-
     else:
         return END + "Aṣiṣe: Jọwọ tẹ 1, 2, 3, 4, tabi 5."
 
@@ -191,6 +229,8 @@ def _handle_own_location(phone: str, inputs: list[str]) -> str:
             return _main_menu()
 
     page = sum(1 for p in next_presses if p == "1")
+
+    # Fetch once per city, then paginate cached text
     yoruba_text = _get_yoruba_weather(phone=phone, city=city)
     page_text, has_more = _paginate(yoruba_text, page)
 
@@ -218,8 +258,8 @@ def _handle_city_choice(phone: str, inputs: list[str]) -> str:
     """
     Ask the user to type a city name, then fetch and show weather.
 
-    inputs = ["5"]              → prompt for city name
-    inputs = ["5", "Lagos"]     → city typed, show first page
+    inputs = ["5"]               → prompt for city name
+    inputs = ["5", "Lagos"]      → city typed, show first page
     inputs = ["5", "Lagos", "1"] → next page
     inputs = ["5", "Lagos", "0"] → exit
     """
@@ -248,19 +288,21 @@ def _handle_city_choice(phone: str, inputs: list[str]) -> str:
         if nav_inputs[-1] == "00":
             return _main_menu()
 
-    geocoded = geocode_city(city_name=city)
-    if not geocoded:
+    page = sum(1 for p in nav_inputs if p == "1")
+
+    # Fetch once per city, then paginate cached text
+    yoruba_text = _get_yoruba_weather(phone=phone, city=city)
+
+    if yoruba_text.startswith("A ko ri"):
         return (
             CON
-            + f"A ko ri '{city}' ninu ètò wa.\n"
+            + f"{yoruba_text}\n"
             + "Jọwọ tẹ orúkọ ilu miran.\n"
             + "00. Pada si akojọ akọkọ"
         )
 
-    _, _, location_name = geocoded
-    page = sum(1 for p in nav_inputs if p == "1")
-    yoruba_text = _get_yoruba_weather(phone=phone, city=city)
     page_text, has_more = _paginate(yoruba_text, page)
+    location_name = city.title()
 
     if has_more:
         return (
