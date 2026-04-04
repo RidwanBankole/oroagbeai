@@ -9,7 +9,7 @@ import threading
 import requests
 import logging
 from flask import Flask
-from app.ivr_handler import ivr_bp
+# from app.ivr_handler import ivr_bp
 from app.ussd_handler import ussd_bp
 from app.config import Config
 

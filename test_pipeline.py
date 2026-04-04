@@ -89,7 +89,7 @@ def run_full_pipeline(city: str = ""):
     # Step 3: Translation
     step(3, "Translating English → Yoruba  (NLLB-200)")
     from app.translation_service import translate_to_yoruba
-    yoruba_text = translate_to_yoruba(english_text, hf_token=hf_token)
+    yoruba_text = translate_to_yoruba(english_text)
     if not yoruba_text:
         fail("Translation returned empty string.")
         sys.exit(1)
@@ -101,7 +101,6 @@ def run_full_pipeline(city: str = ""):
     from app.tts_service import synthesise_yoruba_speech
     audio_url = synthesise_yoruba_speech(
         yoruba_text,
-        hf_token=hf_token,
         base_url=base_url,
     )
     if audio_url:
