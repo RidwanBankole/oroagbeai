@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Oro Agbe — Farmer's Weather</title>
+  <style>
+    :root {
+      --green:      #2d6a4f;
+      --green-light:#52b788;
+      --green-pale: #d8f3dc;
+      --gold:       #f4a300;
+      --gold-light: #fff3cd;
+      --red:        #c0392b;
+      --grey:       #f5f5f0;
+      --text:       #1a1a1a;
+      --muted:      #666;
+      --radius:     12px;
+      --shadow:     0 4px 20px rgba(0,0,0,0.10);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--grey);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: linear-gradient(135deg, var(--green) 0%, #1b4332 100%);
+      color: #fff;
+      padding: 28px 24px 22px;
+      text-align: center;
+    }
+    header h1 { font-size: 2rem; letter-spacing: 1px; }
+    header p  { margin-top: 6px; opacity: .85; font-size: .95rem; }
+
+    /* ── Main ── */
+    main {
+      max-width: 680px;
+      margin: 32px auto;
+      padding: 0 16px 60px;
+    }
+
+    /* ── Search card ── */
+    .search-card {
+      background: #fff;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 28px 24px;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .search-card input {
+      flex: 1;
+      min-width: 180px;
+      padding: 13px 16px;
+      border: 2px solid #ddd;
+      border-radius: 8px;
+      font-size: 1rem;
+      outline: none;
+      transition: border-color .2s;
+    }
+    .search-card input:focus { border-color: var(--green-light); }
+    .search-card button {
+      padding: 13px 28px;
+      background: var(--green);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .2s, transform .1s;
+      white-space: nowrap;
+    }
+    .search-card button:hover   { background: #1b4332; }
+    .search-card button:active  { transform: scale(.97); }
+    .search-card button:disabled {
+      background: #aaa;
+      cursor: not-allowed;
+    }
+
+    /* ── Steps progress ── */
+    .steps {
+      display: none;
+      margin-top: 24px;
+      background: #fff;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 20px 24px;
+    }
+    .steps.visible { display: block; }
+    .steps h3 {
+      font-size: .85rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--muted);
+      margin-bottom: 14px;
+    }
+    .step-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 0;
+      border-bottom: 1px solid #f0f0f0;
+      font-size: .95rem;
+    }
+    .step-row:last-child { border-bottom: none; }
+    .step-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: .85rem;
+      flex-shrink: 0;
+      background: #eee;
+      color: var(--muted);
+      transition: background .3s, color .3s;
+    }
+    .step-icon.pending  { background: #eee;           color: var(--muted); }
+    .step-icon.running  { background: var(--gold-light); color: var(--gold);  animation: pulse 1s infinite; }
+    .step-icon.done     { background: var(--green-pale); color: var(--green); }
+    .step-icon.failed   { background: #fde8e8;         color: var(--red);   }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+    /* ── Result card ── */
+    .result-card {
+      display: none;
+      margin-top: 24px;
+      background: #fff;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .result-card.visible { display: block; }
+
+    .result-header {
+      background: linear-gradient(135deg, var(--green) 0%, #1b4332 100%);
+      color: #fff;
+      padding: 18px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .result-header .location { font-size: 1.2rem; font-weight: 700; }
+    .result-header .condition { opacity: .85; font-size: .95rem; }
+
+    .weather-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 1px;
+      background: #eee;
+    }
+    .weather-tile {
+      background: #fff;
+      padding: 16px;
+      text-align: center;
+    }
+    .weather-tile .val  { font-size: 1.4rem; font-weight: 700; color: var(--green); }
+    .weather-tile .lbl  { font-size: .78rem; color: var(--muted); margin-top: 2px; }
+
+    .section {
+      padding: 18px 24px;
+      border-top: 1px solid #f0f0f0;
+    }
+    .section h4 {
+      font-size: .8rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .section p {
+      font-size: .95rem;
+      line-height: 1.6;
+      color: var(--text);
+    }
+
+    .advisory-box {
+      background: var(--gold-light);
+      border-left: 4px solid var(--gold);
+      border-radius: 6px;
+      padding: 14px 16px;
+      font-size: .92rem;
+      line-height: 1.6;
+    }
+
+    .tomorrow-row {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      font-size: .92rem;
+    }
+    .tomorrow-row span {
+      background: var(--green-pale);
+      color: var(--green);
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-weight: 600;
+    }
+
+    /* ── Audio player ── */
+    .audio-section {
+      padding: 18px 24px;
+      border-top: 1px solid #f0f0f0;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .audio-section h4 {
+      font-size: .8rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--muted);
+    }
+    .audio-section audio { width: 100%; }
+    .audio-link {
+      font-size: .82rem;
+      color: var(--green);
+      word-break: break-all;
+      text-decoration: none;
+    }
+    .audio-link:hover { text-decoration: underline; }
+
+    /* ── Error banner ── */
+    .error-banner {
+      display: none;
+      margin-top: 20px;
+      background: #fde8e8;
+      border-left: 4px solid var(--red);
+      border-radius: 8px;
+      padding: 14px 18px;
+      color: var(--red);
+      font-size: .95rem;
+    }
+    .error-banner.visible { display: block; }
+
+    /* ── Footer ── */
+    footer {
+      text-align: center;
+      padding: 20px;
+      color: var(--muted);
+      font-size: .82rem;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🌾 Oro Agbe</h1>
+  <p>Farmer's Weather · Iroyin Oju Ojo fun Agbẹ</p>
+</header>
+
+<main>
+
+  <!-- Search -->
+  <div class="search-card">
+    <input
+      id="cityInput"
+      type="text"
+      placeholder="Enter city name e.g. Ibadan, Lagos, Akure..."
+      autocomplete="off"
+    />
+    <button id="runBtn" onclick="runPipeline()">Get Weather</button>
+  </div>
+
+  <!-- Error -->
+  <div class="error-banner" id="errorBanner"></div>
+
+  <!-- Steps -->
+  <div class="steps" id="stepsPanel">
+    <h3>Pipeline Progress</h3>
+    <div class="step-row">
+      <div class="step-icon pending" id="s1">1</div>
+      <span>Resolving location</span>
+    </div>
+    <div class="step-row">
+      <div class="step-icon pending" id="s2">2</div>
+      <span>Fetching weather from wttr.in</span>
+    </div>
+    <div class="step-row">
+      <div class="step-icon pending" id="s3">3</div>
+      <span>Translating to Yoruba</span>
+    </div>
+    <div class="step-row">
+      <div class="step-icon pending" id="s4">4</div>
+      <span>Synthesising Yoruba speech</span>
+    </div>
+  </div>
+
+  <!-- Result -->
+  <div class="result-card" id="resultCard">
+
+    <div class="result-header">
+      <div>
+        <div class="location" id="rLocation"></div>
+        <div class="condition" id="rCondition"></div>
+      </div>
+      <div style="font-size:2rem" id="rEmoji">🌤️</div>
+    </div>
+
+    <div class="weather-grid">
+      <div class="weather-tile">
+        <div class="val" id="rTemp">--</div>
+        <div class="lbl">Temperature</div>
+      </div>
+      <div class="weather-tile">
+        <div class="val" id="rFeels">--</div>
+        <div class="lbl">Feels Like</div>
+      </div>
+      <div class="weather-tile">
+        <div class="val" id="rHumidity">--</div>
+        <div class="lbl">Humidity</div>
+      </div>
+      <div class="weather-tile">
+        <div class="val" id="rWind">--</div>
+        <div class="lbl">Wind</div>
+      </div>
+      <div class="weather-tile">
+        <div class="val" id="rHigh">--</div>
+        <div class="lbl">Today High</div>
+      </div>
+      <div class="weather-tile">
+        <div class="val" id="rLow">--</div>
+        <div class="lbl">Today Low</div>
+      </div>
+      <div class="weather-tile">
+        <div class="val" id="rSunrise">--</div>
+        <div class="lbl">Sunrise</div>
+      </div>
+      <div class="weather-tile">
+        <div class="val" id="rSunset">--</div>
+        <div class="lbl">Sunset</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h4>🌧 Tomorrow</h4>
+      <div class="tomorrow-row" id="rTomorrow"></div>
+    </div>
+
+    <div class="section">
+      <h4>🌿 Farming Advisory</h4>
+      <div class="advisory-box" id="rAdvisory"></div>
+    </div>
+
+    <div class="section">
+      <h4>🇳🇬 Yoruba Translation</h4>
+      <p id="rYoruba"></p>
+    </div>
+
+    <div class="audio-section" id="audioSection" style="display:none">
+      <h4>🔊 Listen in Yoruba</h4>
+      <audio id="audioPlayer" controls></audio>
+      <a class="audio-link" id="audioLink" target="_blank"></a>
+    </div>
+
+  </div>
+
+</main>
+
+<footer>Oro Agbe · Farmer's Matter · Oko L'owó</footer>
+
+<script>
+  const API_BASE = "https://oroagbeai.onrender.com";
+
+  function setStep(n, state) {
+    // state: 'pending' | 'running' | 'done' | 'failed'
+    const icons = { pending:"○", running:"⟳", done:"✓", failed:"✗" };
+    const el = document.getElementById("s" + n);
+    el.className = "step-icon " + state;
+    el.textContent = icons[state];
+  }
+
+  function resetSteps() {
+    for (let i = 1; i <= 4; i++) setStep(i, "pending");
+  }
+
+  function conditionEmoji(condition) {
+    const c = (condition || "").toLowerCase();
+    if (c.includes("thunder"))      return "⛈️";
+    if (c.includes("heavy rain"))   return "🌧️";
+    if (c.includes("rain"))         return "🌦️";
+    if (c.includes("drizzle"))      return "🌦️";
+    if (c.includes("overcast"))     return "☁️";
+    if (c.includes("cloudy"))       return "⛅";
+    if (c.includes("fog"))          return "🌫️";
+    if (c.includes("snow"))         return "❄️";
+    if (c.includes("clear"))        return "☀️";
+    if (c.includes("mainly clear")) return "🌤️";
+    return "🌤️";
+  }
+
+  function showError(msg) {
+    const el = document.getElementById("errorBanner");
+    el.textContent = "✗ " + msg;
+    el.classList.add("visible");
+  }
+
+  function hideError() {
+    document.getElementById("errorBanner").classList.remove("visible");
+  }
+
+  async function runPipeline() {
+    const city = document.getElementById("cityInput").value.trim();
+    if (!city) {
+      showError("Please enter a city name.");
+      return;
+    }
+
+    // Reset UI
+    hideError();
+    resetSteps();
+    document.getElementById("stepsPanel").classList.add("visible");
+    document.getElementById("resultCard").classList.remove("visible");
+    document.getElementById("audioSection").style.display = "none";
+    document.getElementById("runBtn").disabled = true;
+    document.getElementById("runBtn").textContent = "Running...";
+
+    // Animate steps — backend runs all 4 internally,
+    // so we advance visually while waiting for the response
+    setStep(1, "running");
+    const stepTimers = [
+      setTimeout(() => { setStep(1,"done"); setStep(2,"running"); }, 800),
+      setTimeout(() => { setStep(2,"done"); setStep(3,"running"); }, 2500),
+      setTimeout(() => { setStep(3,"done"); setStep(4,"running"); }, 6000),
+    ];
+
+    try {
+      const response = await fetch(`${API_BASE}/pipeline`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ city }),
+      });
+
+      // Clear timers and mark all done
+      stepTimers.forEach(clearTimeout);
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        setStep(1,"failed"); setStep(2,"failed");
+        setStep(3,"failed"); setStep(4,"failed");
+        showError(err.error || `Server error (${response.status})`);
+        return;
+      }
+
+      const data = await response.json();
+      const w    = data.weather;
+
+      // Mark all steps done
+      for (let i = 1; i <= 4; i++) setStep(i, "done");
+
+      // Populate result card
+      document.getElementById("rLocation").textContent  = data.location;
+      document.getElementById("rCondition").textContent = w.condition;
+      document.getElementById("rEmoji").textContent     = conditionEmoji(w.condition);
+      document.getElementById("rTemp").textContent      = `${Math.round(w.temperature)}°C`;
+      document.getElementById("rFeels").textContent     = `${Math.round(w.feels_like)}°C`;
+      document.getElementById("rHumidity").textContent  = `${w.humidity}%`;
+      document.getElementById("rWind").textContent      = `${Math.round(w.wind_speed)} km/h`;
+      document.getElementById("rHigh").textContent      = `${Math.round(w.today_high)}°C`;
+      document.getElementById("rLow").textContent       = `${Math.round(w.today_low)}°C`;
+      document.getElementById("rSunrise").textContent   = w.sunrise;
+      document.getElementById("rSunset").textContent    = w.sunset;
+
+      document.getElementById("rTomorrow").innerHTML =
+        `<span>${w.tomorrow_condition}</span>
+         <span>High ${Math.round(w.tomorrow_high)}°C</span>
+         <span>Low ${Math.round(w.tomorrow_low)}°C</span>`;
+
+      document.getElementById("rAdvisory").textContent = w.advisory;
+      document.getElementById("rYoruba").textContent   = data.yoruba_text;
+
+      // Audio
+      if (data.audio_url) {
+        document.getElementById("audioPlayer").src     = data.audio_url;
+        document.getElementById("audioLink").href      = data.audio_url;
+        document.getElementById("audioLink").textContent = data.audio_url;
+        document.getElementById("audioSection").style.display = "flex";
+      }
+
+      document.getElementById("resultCard").classList.add("visible");
+
+    } catch (err) {
+      stepTimers.forEach(clearTimeout);
+      for (let i = 1; i <= 4; i++) setStep(i, "failed");
+      showError("Network error — could not reach the server. Is the backend running?");
+    } finally {
+      document.getElementById("runBtn").disabled = false;
+      document.getElementById("runBtn").textContent = "Get Weather";
+    }
+  }
+
+  // Allow Enter key to trigger search
+  document.getElementById("cityInput").addEventListener("keydown", e => {
+    if (e.key === "Enter") runPipeline();
+  });
+</script>
+
+</body>
+</html>

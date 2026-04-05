@@ -17,3 +17,4 @@ requests
 groq
 scipy
 pydub
+flask-cors
