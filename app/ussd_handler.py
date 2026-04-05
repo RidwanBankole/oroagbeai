@@ -1,10 +1,8 @@
 """
 Oro Agbe — USSD Handler
 Africa's Talking USSD webhook endpoint.
-
 USSD is text-only. The flow returns the Yoruba-translated
 weather message directly as text on the farmer's phone.
-
 Flow:
   Session start  → Welcome menu
   Input "1"      → Ibadan weather
@@ -13,43 +11,33 @@ Flow:
   Input "4"      → Iragbiji weather
   Input "5"      → Ask user to type any city name
   Input "00"     → Return to main menu
-
 Africa's Talking USSD responses use plain text:
   - Start with "CON " to continue the session
   - Start with "END " to close the session
-
 Timing contract:
   Africa's Talking kills a USSD session after ~5 seconds with no response.
   Fetching weather + translating via Groq can take 10-30 s, so we NEVER do
   that work inside the request handler.  Instead:
-
-  1. On a cache MISS the handler immediately returns a CON "hold" message
+  1. On a cache MISS the handler immediately returns an END "hold" message
      (< 1 s) and spawns a background thread to fetch + translate + cache.
   2. The user sees "Jowo pe pada lẹyin iṣẹju kan" and dials again.
   3. On the second dial the cache is warm → instant response.
-  4. For the 4 preset cities the cache is pre-warmed at app startup so
-     most users never hit step 1.
-
 Cache:
   JSON files in /tmp/oro_agbe_cache/ — shared across all Gunicorn workers
   on the same Render instance without needing Redis.  TTL = 15 minutes.
 """
-
 import hashlib
 import json
 import logging
 import os
 import threading
 import time
-
 from flask import Blueprint, request
-
 from app.location_service import geocode_city
 from app.weather_service import get_weather, weather_to_english_text
 from app.translation_service import translate_to_yoruba
 
 logger = logging.getLogger(__name__)
-
 ussd_bp = Blueprint("ussd", __name__, url_prefix="/ussd")
 
 CON = "CON "
@@ -65,8 +53,7 @@ PRESET_CITIES = {
 # ---------------------------------------------------------------------------
 # File-based cache — shared across all Gunicorn workers via /tmp
 # ---------------------------------------------------------------------------
-
-_CACHE_DIR    = "/tmp/oro_agbe_cache"
+_CACHE_DIR      = "/tmp/oro_agbe_cache"
 _USSD_CACHE_TTL = 900   # 15 minutes
 
 os.makedirs(_CACHE_DIR, exist_ok=True)
@@ -112,13 +99,12 @@ def _set_cached_weather_text(city: str, text: str) -> None:
 # ---------------------------------------------------------------------------
 # Background fetch — runs OUTSIDE the AT 5-second window
 # ---------------------------------------------------------------------------
-
 def _fetch_and_cache(city: str) -> None:
     """
     Full pipeline: geocode → weather → translate → cache.
-    Designed to run in a daemon thread.  Retries up to 3 times with a
-    10-second gap so transient Open-Meteo errors don't permanently poison
-    the cache state.
+    Designed to run in a daemon thread. Retries up to 3 times with
+    exponential backoff (30s, 60s, 90s) so Open-Meteo 429 rate limit
+    errors are given enough time to clear before retrying.
     """
     try:
         geocoded = geocode_city(city_name=city)
@@ -134,8 +120,12 @@ def _fetch_and_cache(city: str) -> None:
             weather = get_weather(lat, lon, location_name)
             if weather:
                 break
-            logger.warning("Background fetch attempt %d failed for %s, retrying...", attempt, city)
-            time.sleep(10)
+            wait = 30 * attempt   # 30s → 60s → 90s — gives Open-Meteo rate limit time to clear
+            logger.warning(
+                "Background fetch attempt %d failed for %s, retrying in %ds...",
+                attempt, city, wait,
+            )
+            time.sleep(wait)
 
         if not weather:
             logger.error("Background fetch: all attempts failed for %s", city)
@@ -171,33 +161,8 @@ def _trigger_background_fetch(city: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Startup pre-warm — called from your app factory / main.py
-# ---------------------------------------------------------------------------
-
-def prewarm_preset_cities() -> None:
-    """
-    Kick off background fetches for all 4 preset cities at startup.
-    Call this once after the Flask app is created, e.g.:
-
-        from app.ussd_handler import prewarm_preset_cities
-        prewarm_preset_cities()
-
-    Workers that already have a warm /tmp cache will skip the fetch.
-    """
-    for city in PRESET_CITIES.values():
-        if not _get_cached_weather_text(city):
-            logger.info("Pre-warming cache for %s", city)
-            _trigger_background_fetch(city)
-            time.sleep(1)   # gentle spacing so we don't hammer Open-Meteo
-        else:
-            logger.info("Pre-warm skipped (cache warm): %s", city)
-
-
-# ---------------------------------------------------------------------------
 # Core weather getter — instant if cached, triggers background fetch if not
 # ---------------------------------------------------------------------------
-
-# Yoruba hold message shown to the user while the background fetch runs
 _HOLD_MESSAGE = (
     "Iroyin oju ojo fun ilu yii ko ti ṣetan.\n"
     "A n pese e nisisiyi.\n\n"
@@ -226,10 +191,9 @@ def _get_yoruba_weather(phone: str = "", city: str = "") -> str | None:
 # ---------------------------------------------------------------------------
 # Pagination
 # ---------------------------------------------------------------------------
-
 def _paginate(text: str, page: int, page_size: int = 160) -> tuple[str, bool]:
     """Split a long Yoruba message into USSD-sized pages."""
-    words  = text.split()
+    words   = text.split()
     pages: list[str] = []
     current = ""
 
@@ -255,7 +219,6 @@ def _paginate(text: str, page: int, page_size: int = 160) -> tuple[str, bool]:
 # ---------------------------------------------------------------------------
 # USSD route
 # ---------------------------------------------------------------------------
-
 @ussd_bp.route("/session", methods=["POST"])
 def ussd_session():
     """Africa's Talking calls this URL for every USSD interaction."""
@@ -272,8 +235,8 @@ def ussd_session():
 
         inputs   = [t.strip() for t in text.split("*")] if text else []
         response = _route_ussd(phone, inputs)
-        logger.info("USSD response: %s...", response[:120])
 
+        logger.info("USSD response: %s...", response[:120])
         return response, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
     except Exception:
@@ -288,7 +251,6 @@ def ussd_session():
 # ---------------------------------------------------------------------------
 # Routing helpers
 # ---------------------------------------------------------------------------
-
 def _main_menu() -> str:
     return (
         CON
@@ -305,6 +267,7 @@ def _main_menu() -> str:
 def _route_ussd(phone: str, inputs: list[str]) -> str:
     if not inputs or inputs == [""]:
         return _main_menu()
+
     if "00" in inputs:
         return _main_menu()
 
@@ -320,7 +283,7 @@ def _route_ussd(phone: str, inputs: list[str]) -> str:
 def _weather_response(city: str, phone: str, next_presses: list[str]) -> str:
     """
     Shared helper used by both preset-city and custom-city flows.
-    Returns a CON hold message if the cache is cold, or the paginated
+    Returns an END hold message if the cache is cold, or the paginated
     weather text if the cache is warm.
     """
     if next_presses:
@@ -329,8 +292,8 @@ def _weather_response(city: str, phone: str, next_presses: list[str]) -> str:
         if next_presses[-1] == "00":
             return _main_menu()
 
-    page         = sum(1 for p in next_presses if p == "1")
-    yoruba_text  = _get_yoruba_weather(phone=phone, city=city)
+    page        = sum(1 for p in next_presses if p == "1")
+    yoruba_text = _get_yoruba_weather(phone=phone, city=city)
 
     # Cache cold → hold message (background fetch already triggered)
     if yoruba_text is None:
@@ -363,6 +326,7 @@ def _weather_response(city: str, phone: str, next_presses: list[str]) -> str:
             + "0. Pari\n"
             + "00. Akojọ akọkọ"
         )
+
     return (
         END
         + f"Oju ojo: {label}\n"
