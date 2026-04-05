@@ -1,19 +1,17 @@
 """
 Oro Agbe — Weather Service
-Fetches current weather + 24-hour forecast from Open-Meteo (free, no API key).
+Fetches current weather + 2-day forecast from wttr.in (free, no API key, no rate limits).
 Returns structured English text ready for translation.
-
 Timeout strategy:
   Africa's Talking kills USSD sessions after ~5 s, so we must respond fast.
   - connect_timeout = 3 s  (fail fast if the host is unreachable)
   - read_timeout    = 5 s  (fail fast if the host stalls)
-  No retries on this layer — the USSD handler's background warm-up loop
+  No retries on this layer — the USSD handler's background fetch loop
   handles retries safely outside the 5-second AT window.
 """
 import logging
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
-
 import requests
 
 logger = logging.getLogger(__name__)
@@ -21,11 +19,9 @@ logger = logging.getLogger(__name__)
 # Hard timeouts: (connect, read) — must keep total well under AT's 5 s limit
 _TIMEOUT = (3, 5)
 
-
 # ---------------------------------------------------------------------------
-# Data model
+# Data model — unchanged so all callers stay compatible
 # ---------------------------------------------------------------------------
-
 @dataclass
 class WeatherData:
     location: str
@@ -56,38 +52,58 @@ class WeatherData:
 
 
 # ---------------------------------------------------------------------------
-# Lookup tables
+# wttr.in weather code → English condition
+# wttr.in uses WWO codes (similar to WMO but not identical)
 # ---------------------------------------------------------------------------
-
-WMO_CODES = {
-    0: "Clear sky",
-    1: "Mainly clear",
-    2: "Partly cloudy",
-    3: "Overcast",
-    45: "Fog",
-    48: "Depositing rime fog",
-    51: "Light drizzle",
-    53: "Moderate drizzle",
-    55: "Dense drizzle",
-    56: "Light freezing drizzle",
-    57: "Dense freezing drizzle",
-    61: "Light rain",
-    63: "Moderate rain",
-    65: "Heavy rain",
-    66: "Light freezing rain",
-    67: "Heavy freezing rain",
-    71: "Light snow",
-    73: "Moderate snow",
-    75: "Heavy snow",
-    77: "Snow grains",
-    80: "Light rain showers",
-    81: "Moderate rain showers",
-    82: "Violent rain showers",
-    85: "Light snow showers",
-    86: "Heavy snow showers",
-    95: "Thunderstorm",
-    96: "Thunderstorm with slight hail",
-    99: "Thunderstorm with heavy hail",
+WWO_CODES = {
+    113: "Clear sky",
+    116: "Partly cloudy",
+    119: "Overcast",
+    122: "Overcast",
+    143: "Fog",
+    176: "Light rain showers",
+    179: "Light snow showers",
+    182: "Light sleet",
+    185: "Light sleet",
+    200: "Thunderstorm",
+    227: "Light snow",
+    230: "Heavy snow",
+    248: "Fog",
+    260: "Fog",
+    263: "Light drizzle",
+    266: "Light drizzle",
+    281: "Light freezing drizzle",
+    284: "Dense freezing drizzle",
+    293: "Light rain",
+    296: "Light rain",
+    299: "Moderate rain",
+    302: "Moderate rain",
+    305: "Heavy rain",
+    308: "Heavy rain",
+    311: "Light freezing rain",
+    314: "Moderate freezing rain",
+    317: "Light sleet",
+    320: "Moderate sleet",
+    323: "Light snow",
+    326: "Moderate snow",
+    329: "Heavy snow",
+    332: "Heavy snow",
+    335: "Heavy snow",
+    338: "Heavy snow",
+    350: "Light sleet",
+    353: "Light rain showers",
+    356: "Moderate rain showers",
+    359: "Violent rain showers",
+    362: "Light sleet showers",
+    365: "Moderate sleet showers",
+    368: "Light snow showers",
+    371: "Heavy snow showers",
+    374: "Light sleet showers",
+    377: "Moderate sleet showers",
+    386: "Thunderstorm with light rain",
+    389: "Thunderstorm with heavy rain",
+    392: "Thunderstorm with light snow",
+    395: "Thunderstorm with heavy snow",
 }
 
 WIND_DIRECTIONS = [
@@ -95,11 +111,35 @@ WIND_DIRECTIONS = [
     "South", "South-West", "West", "North-West",
 ]
 
+# wttr.in wind direction strings → our standard labels
+_WTTR_WIND_MAP = {
+    "N":   "North",
+    "NNE": "North-East",
+    "NE":  "North-East",
+    "ENE": "East",
+    "E":   "East",
+    "ESE": "East",
+    "SE":  "South-East",
+    "SSE": "South-East",
+    "S":   "South",
+    "SSW": "South-West",
+    "SW":  "South-West",
+    "WSW": "West",
+    "W":   "West",
+    "WNW": "West",
+    "NW":  "North-West",
+    "NNW": "North-West",
+}
+
+# Thunderstorm WWO codes
+_THUNDER_CODES = {200, 386, 389, 392, 395}
+# Rainy WWO codes
+_RAIN_CODES    = {176, 263, 266, 293, 296, 299, 302, 305, 308, 353, 356, 359}
+
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers — unchanged signatures
 # ---------------------------------------------------------------------------
-
 def _wind_direction(degrees: float) -> str:
     idx = round(degrees / 45) % 8
     return WIND_DIRECTIONS[idx]
@@ -183,8 +223,8 @@ def _farming_advisory(
     wind_speed: float, uv_index: float,
 ) -> str:
     advice     = []
-    thunder    = weather_code in {95, 96, 99}
-    rainy      = weather_code in {51, 53, 55, 61, 63, 65, 80, 81, 82}
+    thunder    = weather_code in _THUNDER_CODES
+    rainy      = weather_code in _RAIN_CODES
     heavy_rain = daily_precipitation >= 20 or daily_precipitation_hours >= 8
     hot        = temperature >= 35 or feels_like >= 38
     windy      = wind_speed >= 35
@@ -214,105 +254,161 @@ def _farming_advisory(
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# wttr.in parsing helpers
 # ---------------------------------------------------------------------------
+def _wttr_condition(wwo_code: int) -> str:
+    return WWO_CODES.get(wwo_code, "Variable conditions")
 
+
+def _wttr_wind_dir(compass: str) -> str:
+    return _WTTR_WIND_MAP.get(compass.upper(), "North")
+
+
+def _wttr_precip_hours(hourly_list: list) -> float:
+    """Count hours in the day where precipitation > 0."""
+    return sum(
+        1 for h in hourly_list
+        if float(h.get("precipMM", 0)) > 0
+    )
+
+
+def _parse_time_hhmm(hhmm: str) -> str:
+    """
+    wttr.in returns sunrise/sunset as '06:23 AM' or '07:00 PM'.
+    Convert to 24-hour HH:MM for consistency with the rest of the app.
+    """
+    try:
+        from datetime import datetime
+        return datetime.strptime(hhmm.strip(), "%I:%M %p").strftime("%H:%M")
+    except ValueError:
+        return hhmm[:5]
+
+
+# ---------------------------------------------------------------------------
+# Public API — same signature as before
+# ---------------------------------------------------------------------------
 def get_weather(lat: float, lon: float, location_name: str) -> Optional[WeatherData]:
     """
-    Fetch weather from Open-Meteo with a hard fast timeout.
+    Fetch weather from wttr.in (free, no API key, no rate limits).
     Returns None immediately on any error — no retries.
     """
-    params = {
-        "latitude":      lat,
-        "longitude":     lon,
-        "timezone":      "Africa/Lagos",
-        "forecast_days": 2,
-        "current": (
-            "temperature_2m,relative_humidity_2m,apparent_temperature,"
-            "precipitation,weather_code,wind_speed_10m,wind_direction_10m,is_day"
-        ),
-        "hourly": "uv_index",
-        "daily": (
-            "weather_code,temperature_2m_max,temperature_2m_min,"
-            "precipitation_sum,precipitation_hours,wind_speed_10m_max,"
-            "sunrise,sunset"
-        ),
-    }
+    url    = f"https://wttr.in/{lat},{lon}"
+    params = {"format": "j1"}   # j1 = full JSON response
+
     try:
         logger.info("Fetching weather for %s (%s, %s)", location_name, lat, lon)
         response = requests.get(
-            "https://api.open-meteo.com/v1/forecast",
+            url,
             params=params,
             timeout=_TIMEOUT,
+            headers={"User-Agent": "OroAgbe-FarmWeatherApp/1.0"},
         )
         response.raise_for_status()
         data = response.json()
 
-        current  = data["current"]
-        daily    = data["daily"]
-        hourly   = data.get("hourly", {})
-        today    = {k: v[0] for k, v in daily.items()}
-        tomorrow = (
-            {k: v[1] for k, v in daily.items()}
-            if len(daily["weather_code"]) > 1 else today
-        )
+        current_cond  = data["current_condition"][0]
+        today_data    = data["weather"][0]
+        tomorrow_data = data["weather"][1] if len(data["weather"]) > 1 else today_data
 
-        current_time           = current["time"]
-        weather_code_now       = current["weather_code"]
-        weather_condition_now  = WMO_CODES.get(weather_code_now, "Variable conditions")
-        weather_condition_tmrw = WMO_CODES.get(tomorrow["weather_code"], "Variable conditions")
-        uv_index               = _pick_hour_value(hourly, "uv_index", current_time)
-        sunrise                = _safe_time_only(today["sunrise"])
-        sunset                 = _safe_time_only(today["sunset"])
+        # --- current values ---
+        temperature   = float(current_cond["temp_C"])
+        feels_like    = float(current_cond["FeelsLikeC"])
+        humidity      = int(current_cond["humidity"])
+        wind_speed    = float(current_cond["windspeedKmph"])
+        wind_dir_str  = _wttr_wind_dir(current_cond["winddir16Point"])
+        wwo_code_now  = int(current_cond["weatherCode"])
+        condition_now = _wttr_condition(wwo_code_now)
+        precip_now    = float(current_cond["precipMM"])
+        uv_index      = float(current_cond.get("uvIndex", 0))
+
+        # wttr.in does not expose is_day directly — infer from observation time
+        obs_time      = current_cond.get("localObsDateTime", "")
+        is_day        = True
+        try:
+            hour = int(obs_time.split(" ")[1].split(":")[0])
+            ampm = obs_time.split(" ")[2] if len(obs_time.split(" ")) > 2 else "AM"
+            if ampm == "PM" and hour != 12:
+                hour += 12
+            elif ampm == "AM" and hour == 12:
+                hour = 0
+            is_day = 6 <= hour < 19
+        except (IndexError, ValueError):
+            is_day = True
+
+        current_time  = obs_time or "N/A"
+
+        # --- today values ---
+        today_high    = float(today_data["maxtempC"])
+        today_low     = float(today_data["mintempC"])
+        today_hourly  = today_data.get("hourly", [])
+        today_precip  = sum(float(h.get("precipMM", 0)) for h in today_hourly)
+        today_precip_hours = _wttr_precip_hours(today_hourly)
+        today_wind_max = max(
+            (float(h.get("windspeedKmph", 0)) for h in today_hourly),
+            default=wind_speed,
+        )
+        sunrise       = _parse_time_hhmm(today_data["astronomy"][0]["sunrise"])
+        sunset        = _parse_time_hhmm(today_data["astronomy"][0]["sunset"])
+
+        # today's dominant condition = first hourly entry's code
+        wwo_today     = int(today_hourly[0]["weatherCode"]) if today_hourly else wwo_code_now
+
+        # --- tomorrow values ---
+        tmrw_hourly   = tomorrow_data.get("hourly", [])
+        wwo_tmrw      = int(tmrw_hourly[0]["weatherCode"]) if tmrw_hourly else wwo_code_now
+        condition_tmrw = _wttr_condition(wwo_tmrw)
+        tmrw_high     = float(tomorrow_data["maxtempC"])
+        tmrw_low      = float(tomorrow_data["mintempC"])
+        tmrw_precip   = sum(float(h.get("precipMM", 0)) for h in tmrw_hourly)
 
         return WeatherData(
             location=location_name,
             current_time=current_time,
-            is_day=bool(current["is_day"]),
-            temperature=current["temperature_2m"],
-            feels_like=current["apparent_temperature"],
-            humidity=current["relative_humidity_2m"],
-            wind_speed=current["wind_speed_10m"],
-            wind_direction=_wind_direction(current["wind_direction_10m"]),
-            weather_condition=weather_condition_now,
-            current_precipitation=current["precipitation"],
+            is_day=is_day,
+            temperature=temperature,
+            feels_like=feels_like,
+            humidity=humidity,
+            wind_speed=wind_speed,
+            wind_direction=wind_dir_str,
+            weather_condition=condition_now,
+            current_precipitation=precip_now,
             uv_index=uv_index,
-            today_high=today["temperature_2m_max"],
-            today_low=today["temperature_2m_min"],
-            today_precipitation_mm=today["precipitation_sum"],
-            today_precipitation_hours=today["precipitation_hours"],
-            today_wind_max=today["wind_speed_10m_max"],
+            today_high=today_high,
+            today_low=today_low,
+            today_precipitation_mm=today_precip,
+            today_precipitation_hours=today_precip_hours,
+            today_wind_max=today_wind_max,
             sunrise=sunrise,
             sunset=sunset,
-            tomorrow_condition=weather_condition_tmrw,
-            tomorrow_high=tomorrow["temperature_2m_max"],
-            tomorrow_low=tomorrow["temperature_2m_min"],
-            tomorrow_precipitation_mm=tomorrow["precipitation_sum"],
+            tomorrow_condition=condition_tmrw,
+            tomorrow_high=tmrw_high,
+            tomorrow_low=tmrw_low,
+            tomorrow_precipitation_mm=tmrw_precip,
             summary_now=_build_now_summary(
-                condition=weather_condition_now,
-                temp=current["temperature_2m"],
-                feels_like=current["apparent_temperature"],
-                humidity=current["relative_humidity_2m"],
-                wind_speed=current["wind_speed_10m"],
-                is_day=bool(current["is_day"]),
+                condition=condition_now,
+                temp=temperature,
+                feels_like=feels_like,
+                humidity=humidity,
+                wind_speed=wind_speed,
+                is_day=is_day,
             ),
             summary_today=_build_today_summary(
-                today_condition=weather_condition_now,
-                high=today["temperature_2m_max"],
-                low=today["temperature_2m_min"],
-                precip_mm=today["precipitation_sum"],
-                precip_hours=today["precipitation_hours"],
-                wind_max=today["wind_speed_10m_max"],
+                today_condition=_wttr_condition(wwo_today),
+                high=today_high,
+                low=today_low,
+                precip_mm=today_precip,
+                precip_hours=today_precip_hours,
+                wind_max=today_wind_max,
             ),
             advisory=_farming_advisory(
-                weather_code=weather_code_now,
-                temperature=current["temperature_2m"],
-                feels_like=current["apparent_temperature"],
-                humidity=current["relative_humidity_2m"],
-                current_precipitation=current["precipitation"],
-                daily_precipitation=today["precipitation_sum"],
-                daily_precipitation_hours=today["precipitation_hours"],
-                wind_speed=current["wind_speed_10m"],
+                weather_code=wwo_code_now,
+                temperature=temperature,
+                feels_like=feels_like,
+                humidity=humidity,
+                current_precipitation=precip_now,
+                daily_precipitation=today_precip,
+                daily_precipitation_hours=today_precip_hours,
+                wind_speed=wind_speed,
                 uv_index=uv_index,
             ),
         )
@@ -325,6 +421,9 @@ def get_weather(lat: float, lon: float, location_name: str) -> Optional[WeatherD
         return None
 
 
+# ---------------------------------------------------------------------------
+# Text formatters — unchanged
+# ---------------------------------------------------------------------------
 def weather_to_english_text(w: WeatherData) -> str:
     return (
         f"Weather report for {w.location}. "
@@ -358,3 +457,59 @@ def weather_to_structured_text(w: WeatherData) -> str:
         f"Summary: {w.summary_today}\n"
         f"Advice: {w.advisory}"
     )
+
+
+if __name__ == "__main__":
+    import json
+
+    # Test coordinates — Ibadan, Osogbo, Ife, Iragbiji
+    test_cities = [
+        (7.3786064, 3.8969928, "Ibadan"),
+        (7.7827994, 4.5417680, "Osogbo"),
+        (7.4834240, 4.5593440, "Ife"),
+        (7.9167000, 4.8333000, "Iragbiji"),
+    ]
+
+    for lat, lon, name in test_cities:
+        print(f"\n{'='*60}")
+        print(f"Testing: {name} ({lat}, {lon})")
+        print('='*60)
+
+        weather = get_weather(lat, lon, name)
+
+        if weather is None:
+            print(f"FAILED: get_weather() returned None for {name}")
+            continue
+
+        print(f"get_weather() SUCCESS")
+        print(f"\n--- WeatherData fields ---")
+        print(f"Location       : {weather.location}")
+        print(f"Current time   : {weather.current_time}")
+        print(f"Is day         : {weather.is_day}")
+        print(f"Temperature    : {weather.temperature}°C")
+        print(f"Feels like     : {weather.feels_like}°C")
+        print(f"Humidity       : {weather.humidity}%")
+        print(f"Wind           : {weather.wind_direction} at {weather.wind_speed} km/h")
+        print(f"Condition      : {weather.weather_condition}")
+        print(f"Precipitation  : {weather.current_precipitation} mm")
+        print(f"UV index       : {weather.uv_index}")
+        print(f"Today high/low : {weather.today_high}°C / {weather.today_low}°C")
+        print(f"Today rain     : {weather.today_precipitation_mm} mm over {weather.today_precipitation_hours} hrs")
+        print(f"Today wind max : {weather.today_wind_max} km/h")
+        print(f"Sunrise/Sunset : {weather.sunrise} / {weather.sunset}")
+        print(f"Tomorrow       : {weather.tomorrow_condition}, {weather.tomorrow_high}°C / {weather.tomorrow_low}°C, {weather.tomorrow_precipitation_mm} mm")
+
+        print(f"\n--- Summary now ---")
+        print(weather.summary_now)
+
+        print(f"\n--- Summary today ---")
+        print(weather.summary_today)
+
+        print(f"\n--- Farming advisory ---")
+        print(weather.advisory)
+
+        print(f"\n--- weather_to_english_text() ---")
+        print(weather_to_english_text(weather))
+
+        print(f"\n--- weather_to_structured_text() ---")
+        print(weather_to_structured_text(weather))
